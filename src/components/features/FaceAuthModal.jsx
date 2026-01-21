@@ -83,22 +83,41 @@ const FaceAuthModal = ({ user, onClose, onSuccess }) => {
             }
 
             try {
-                const s = await navigator.mediaDevices.getUserMedia({ video: {} });
+                // Try with video constraints
+                const constraints = {
+                    video: {
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        facingMode: "user"
+                    },
+                    audio: false
+                };
+                
+                const s = await navigator.mediaDevices.getUserMedia(constraints);
                 if (!isMounted) {
                     s.getTracks().forEach(t => t.stop());
                     return;
                 }
                 streamRef.current = s;
-                if (videoRef.current) videoRef.current.srcObject = s;
+                if (videoRef.current) {
+                    videoRef.current.srcObject = s;
+                    // Ensure video plays
+                    videoRef.current.onloadedmetadata = () => {
+                        videoRef.current.play().catch(e => console.error("Play error:", e));
+                    };
+                }
+                setFaceStatus("✅ CAMERA_ACTIVE - READY TO SCAN");
             } catch (e) {
                 if (isMounted) {
                     console.error("Camera Error:", e);
                     if (e.name === 'NotAllowedError') {
-                        setFaceStatus("ERROR: CAMERA PERMISSION DENIED");
+                        setFaceStatus("❌ CAMERA PERMISSION DENIED - Check browser settings");
                     } else if (e.name === 'NotFoundError') {
-                        setFaceStatus("ERROR: NO CAMERA FOUND");
+                        setFaceStatus("❌ NO CAMERA FOUND - Connect a webcam");
+                    } else if (e.name === 'NotReadableError') {
+                        setFaceStatus("❌ CAMERA IN USE - Close other apps");
                     } else {
-                        setFaceStatus(`CAMERA ERROR: ${e.name || e.message}`);
+                        setFaceStatus(`❌ CAMERA ERROR: ${e.name}`);
                     }
                 }
             }
@@ -186,7 +205,13 @@ const FaceAuthModal = ({ user, onClose, onSuccess }) => {
                 </div>
 
                 {/* Video Element */}
-                <video ref={videoRef} autoPlay muted className="w-full h-full object-cover opacity-90" />
+                <video 
+                    ref={videoRef} 
+                    autoPlay 
+                    playsInline
+                    muted 
+                    style={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', opacity: 0.9, backgroundColor: '#000' }}
+                />
 
                 {/* Scanning Overlay UI */}
                 <div className="absolute inset-0 pointer-events-none z-10">
@@ -208,13 +233,17 @@ const FaceAuthModal = ({ user, onClose, onSuccess }) => {
 
                 {/* Bottom Controls */}
                 <div className="absolute bottom-0 w-full bg-[#050505] border-t border-white/20 p-6 flex flex-col items-center gap-4 z-20">
-                    <p className="text-white font-mono text-xs uppercase tracking-widest text-center">{faceStatus}</p>
-                    {authStep === 'register-face' && (
+                    <div className="w-full">
+                        <p className="text-white font-mono text-xs uppercase tracking-widest text-center">{faceStatus}</p>
+                        {!modelsLoaded && <p className="text-yellow-400 text-[10px] mt-2 text-center">Loading AI models...</p>}
+                        {!streamRef.current && modelsLoaded && !faceStatus.includes("ERROR") && <p className="text-yellow-400 text-[10px] mt-2 text-center">Initializing camera...</p>}
+                    </div>
+                    {authStep === 'register-face' && modelsLoaded && (
                         <button onClick={handleRegisterFace} className="w-full py-3 bg-[#6500aa] hover:bg-white hover:text-black text-white font-bold uppercase tracking-widest transition-colors text-xs border border-transparent">
                             Initialize Face ID
                         </button>
                     )}
-                    {authStep === 'verify-face' && (
+                    {authStep === 'verify-face' && modelsLoaded && (
                         <button onClick={handleVerifyFace} className="w-full py-3 bg-white hover:bg-[#6500aa] hover:text-white text-black font-bold uppercase tracking-widest transition-colors text-xs border border-transparent">
                             Authenticate
                         </button>
