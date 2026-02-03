@@ -8,7 +8,7 @@ const FaceAuthModal = ({ user, onClose, onSuccess }) => {
     const [modelsLoaded, setModelsLoaded] = useState(false);
     const videoRef = useRef(null);
     const streamRef = useRef(null);
-    const [scanInterval, setScanInterval] = useState(null);
+    const scanLoopRef = useRef(null);
 
     // Load Face API
     useEffect(() => {
@@ -92,7 +92,7 @@ const FaceAuthModal = ({ user, onClose, onSuccess }) => {
                     },
                     audio: false
                 };
-                
+
                 const s = await navigator.mediaDevices.getUserMedia(constraints);
                 if (!isMounted) {
                     s.getTracks().forEach(t => t.stop());
@@ -129,70 +129,107 @@ const FaceAuthModal = ({ user, onClose, onSuccess }) => {
         };
     }, [modelsLoaded, stopCameraStream]);
 
-    // Cleanup Interval
-    useEffect(() => {
-        return () => {
-            if (scanInterval) clearInterval(scanInterval);
-        };
-    }, [scanInterval]);
 
+
+
+    // Helper: Detect Face
+    const detectFace = async () => {
+        if (!videoRef.current || videoRef.current.paused || videoRef.current.ended || !window.faceapi) return null;
+
+        // Ensure options are created fresh or reused if static
+        const options = new window.faceapi.TinyFaceDetectorOptions();
+        return await window.faceapi.detectSingleFace(videoRef.current, options)
+            .withFaceLandmarks()
+            .withFaceDescriptor();
+    };
+
+    // Generic Scan Loop
+    const startScanLoop = (onResult) => {
+        const loop = async () => {
+            if (scanLoopRef.current === null) return; // Stopped
+
+            try {
+                const detection = await detectFace();
+                if (detection) {
+                    const shouldContinue = await onResult(detection);
+                    if (!shouldContinue) {
+                        stopScanLoop();
+                        return;
+                    }
+                }
+            } catch (err) {
+                console.warn("Scan error, retrying...", err);
+            }
+
+            // Schedule next scan only after current one finishes
+            if (scanLoopRef.current !== null) {
+                scanLoopRef.current = setTimeout(loop, 100);
+            }
+        };
+
+        scanLoopRef.current = setTimeout(loop, 100);
+    };
+
+    const stopScanLoop = () => {
+        if (scanLoopRef.current) {
+            clearTimeout(scanLoopRef.current);
+            scanLoopRef.current = null;
+        }
+    };
+
+    // Cleanup Scan Loop on Unmount
+    useEffect(() => {
+        return () => stopScanLoop();
+    }, []);
 
     const handleRegisterFace = async () => {
         if (!videoRef.current || !modelsLoaded || !user) return;
         setFaceStatus("SCANNING_BIOMETRICS...");
 
-        const interval = setInterval(async () => {
-            try {
-                if (videoRef.current.paused || videoRef.current.ended || !window.faceapi) return;
-                const detections = await window.faceapi.detectSingleFace(videoRef.current, new window.faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
-                if (detections) {
-                    clearInterval(interval);
-                    const descriptor = Array.from(detections.descriptor);
-                    await setDoc(doc(db, "face_descriptors", user.uid), { descriptor });
-                    alert("FACE_ID_REGISTERED");
-                    stopCameraStream();
-                    onSuccess(); // Grants access
-                }
-            } catch (error) {
-                console.log("Waiting for face...", error);
-            }
-        }, 500);
-        setScanInterval(interval);
+        stopScanLoop(); // Ensure no existing loop
+        // Initialize ref if null (will be done by starScanLoop but we need to ensure ref exists)
+        // scanLoopRef is a ref, so current can be set. 
+        // Note: We need to define scanLoopRef in the component scope (next step).
+
+        startScanLoop(async (detection) => {
+            const descriptor = Array.from(detection.descriptor);
+            await setDoc(doc(db, "face_descriptors", user.uid), { descriptor });
+            alert("FACE_ID_REGISTERED");
+            stopCameraStream();
+            onSuccess();
+            return false; // Stop scanning
+        });
     };
 
     const handleVerifyFace = async () => {
         if (!videoRef.current || !modelsLoaded || !user) return;
         setFaceStatus("VERIFYING_IDENTITY...");
 
-        const interval = setInterval(async () => {
-            try {
-                if (videoRef.current.paused || videoRef.current.ended || !window.faceapi) return;
-                const detections = await window.faceapi.detectSingleFace(videoRef.current, new window.faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
-                if (detections) {
-                    const docRef = doc(db, "face_descriptors", user.uid);
-                    const docSnap = await getDoc(docRef);
-                    if (docSnap.exists()) {
-                        const savedDescriptor = new Float32Array(docSnap.data().descriptor);
-                        const distance = window.faceapi.euclideanDistance(detections.descriptor, savedDescriptor);
-                        if (distance < 0.6) {
-                            clearInterval(interval);
-                            stopCameraStream();
-                            setFaceStatus("ACCESS_GRANTED");
-                            setTimeout(onSuccess, 500);
-                        } else {
-                            setFaceStatus("ACCESS_DENIED: MISMATCH");
-                        }
-                    } else {
-                        clearInterval(interval);
-                        setFaceStatus("ERROR: ID_NOT_FOUND");
-                        setAuthStep('register-face');
-                    }
+        stopScanLoop();
+
+        startScanLoop(async (detection) => {
+            const docRef = doc(db, "face_descriptors", user.uid);
+            const docSnap = await getDoc(docRef);
+
+            if (docSnap.exists()) {
+                const savedDescriptor = new Float32Array(docSnap.data().descriptor);
+                const distance = window.faceapi.euclideanDistance(detection.descriptor, savedDescriptor);
+
+                if (distance < 0.6) {
+                    stopCameraStream();
+                    setFaceStatus("ACCESS_GRANTED");
+                    setTimeout(onSuccess, 500);
+                    return false; // Stop scanning on success
+                } else {
+                    setFaceStatus("ACCESS_DENIED: MISMATCH");
+                    return true; // Keep scanning
                 }
-            } catch (e) {
-                console.log("Scanning...", e);
+            } else {
+                setFaceStatus("ERROR: ID_NOT_FOUND");
+                setAuthStep('register-face');
+                return false; // Stop verification loop
             }
-        }, 500);
-        setScanInterval(interval);
+        });
     };
 
     return (
@@ -205,11 +242,11 @@ const FaceAuthModal = ({ user, onClose, onSuccess }) => {
                 </div>
 
                 {/* Video Element */}
-                <video 
-                    ref={videoRef} 
-                    autoPlay 
+                <video
+                    ref={videoRef}
+                    autoPlay
                     playsInline
-                    muted 
+                    muted
                     style={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', opacity: 0.9, backgroundColor: '#000' }}
                 />
 
